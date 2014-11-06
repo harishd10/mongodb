@@ -1,5 +1,5 @@
-MongoDB with STING
-==================
+MongoDB with (a) STING
+======================
 
 This is the MongoDB database that has been  modified to support our GPU based spatio-temporal index (STING). STING has the following properties:
 
@@ -17,11 +17,13 @@ Ensure CUDA is installed in standard directories. Else specify the directory in 
 
 GPU Support
 -----------
-Currently the following 3 query execution implementations are present inside MongoDB: CPU, GPU and Hybrid. This is specified using the constants CPU, CUDA, and CUDA_PARTIAL respectively. To select the required type, change the value of variable requestType in the file "src/mongo/db/index/kdtree_cursor.h" and recompile the code. The standalone code (in the ./standalone directory) supports both in-memory as well as out-of-core execution of the different strategies which can be specified in the command-line.
+The following query execution implementations are present inside MongoDB: CPU, GPU and Hybrid. This is specified using the constants CPU, CUDA, and CUDA_PARTIAL respectively (append _IM to the constants to use in-memory variant, and CUDA_DP to use dynamic parallelism). To select the required type, change the value of variable requestType in the file "src/mongo/db/index/kdtree_cursor.h". 
+
+The GPU based querying implementation details can be found in the standalone code as well (in the ./standalone directory). This uses the index files created in MongoDB (which can also be created by the standalone code by providing the appropriate binary file format).
 
 Creating a STING index
 ------------------------
-An index can be created using a command similar to:
+A STING index can be created in MongoDB using a command similar to:
 
 db.trips.ensureIndex({type: "sting", pickup_time: 1, dropoff_time: 1, pickup: "2d", dropoff: "2d"},{name: "taxi_index"})
 
@@ -43,6 +45,6 @@ LICENSE
   GNU Affero General Public License (AGPL), and partially under the terms of the 
   Apache License, version 2.0.  MONGO-README for more details.
   
-  The files pertaining to STING -- src/mongo/db/kdtree/*, src/mongo/db/index/kdtree* -- are 
+  The files pertaining to STING -- src/mongo/db/kdtree/\*, src/mongo/db/index/kdtree\*, and standalone/\* -- are 
   made available under the terms of the Apache License, version 2.0.
 
