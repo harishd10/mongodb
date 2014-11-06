@@ -28,7 +28,7 @@ namespace mongo {
 	{
 		const uint32_t index = (blockIdx.x * blockDim.x + threadIdx.x);
 		bool matched = (index < numBlocks) && KdQuery::rangeMatched(blockRanges + index * size * 2, queryRanges, size);
-		output[index] = matched ? index : 0xFFFFFFFFFFFFFFFF;
+		output[index] = matched ? index : 0xFFFFFFFF;
 	}
 	
 	// called only for in memory

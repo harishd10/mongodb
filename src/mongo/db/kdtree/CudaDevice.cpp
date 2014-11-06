@@ -76,7 +76,7 @@ namespace mongo {
 			this->memLimit = memAvail;
 		this->memReserved = std::min(0.9 * memAvail, 1.0 * this->memLimit);
 		checkCudaErrors(cudaMalloc(&this->memory, this->memReserved));
-//		fprintf(stderr, "GPU %d: reserved %g MB.\n", mydevice, this->memReserved / 1024.0 / 1024.0);
+//		fprintf(stderr, "GPU %d: reserved %g MB.\n", mydevice,this->memReserved / 1024.0 / 1024.0);
 	
 		boost::mutex::scoped_lock lock(this->mutex);
 		this->started = true;
@@ -97,11 +97,17 @@ namespace mongo {
 			KdRequest request = this->queue.pop();
 			switch (request.type) {
 			case RT_CUDA:
-			case RT_CUDA_DP:
 				this->completeQuery(request, request.type == RT_CUDA_DP);
+				break;
+			case RT_CUDA_IM:
+			case RT_CUDA_DP:
+				this->completeQueryDP(request, request.type == RT_CUDA_DP);
 				break;
 			case RT_CUDA_PARTIAL:
 				this->partialQuery(request);
+				break;
+			case RT_CUDA_PARTIAL_IM:
+				this->partialQueryIM(request);
 				break;
 			case RT_STOP:
 				stop = true;
@@ -129,6 +135,102 @@ namespace mongo {
 	}
 	
 	// TODO
+	void CudaDevice::completeQueryDP(KdRequest &request, bool dp) {
+		uint32_t qsize = request.query->size;
+		int tosub = sizeof(uint64_t) * 2 * qsize; // QueryRange
+		int regionsSize = 0;
+		for(int i = 0;i < request.noRegions;i ++) {
+			regionsSize += request.regions[i].size() * 2; // Polygonal regions
+		}
+		tosub += regionsSize * sizeof(float);
+		// TO pass region size and offset
+		tosub += sizeof(uint32_t) * request.noRegions; // Polygonal regions offset
+		tosub += sizeof(uint32_t) * request.noRegions; // Polygonal regions sizes
+
+		int totalBlocks = request.numBlocks;
+		tosub += sizeof(TripKey) * (qsize + 1) * totalBlocks * KdBlock::MAX_RECORDS_PER_BLOCK;
+
+		size_t remMemory = this->memReserved - tosub;
+		size_t den = sizeof(uint64_t) * qsize * 2 + sizeof(uint64_t);
+		den += (sizeof(TripKey) * (qsize + 1) + sizeof(uint64_t));
+		int maxBlocks = remMemory / den;
+
+
+		TripKey *keys = request.keys;
+		uint64_t *ranges = request.ranges;
+
+		// HARISH qRange is the same as query for us
+		uint64_t * qRange = new uint64_t[qsize * 2];
+		request.query->toRange(qRange);
+
+		cudaStream_t dStream;
+		checkCudaErrors(cudaStreamCreate(&dStream));
+
+
+		uint64_t *dQueryRange = (uint64_t*) this->memory;
+		float *dRegions = (float*) (dQueryRange + qsize * 2);
+		uint32_t *dRegionOffset = (uint32_t*)(dRegions + regionsSize);
+		uint32_t *dRegionSize = (uint32_t*)(dRegionOffset + request.noRegions);
+		TripKey *dData = (TripKey*) (dRegionSize + request.noRegions);
+
+		checkCudaErrors(cudaMemcpyAsync(dQueryRange, qRange, qsize * sizeof(uint64_t) * 2,cudaMemcpyHostToDevice, dStream));
+
+		uint32_t offset = 0;
+		for(int i = 0;i < request.noRegions;i ++) {
+			checkCudaErrors(cudaMemcpyAsync(dRegions + offset, &request.regions[i].front(), sizeof(float) * request.regions[i].size() * 2,cudaMemcpyHostToDevice, dStream));
+			checkCudaErrors(cudaMemcpyAsync(dRegionOffset + i, &offset, sizeof(uint32_t),cudaMemcpyHostToDevice, dStream));
+			uint32_t rsize = request.regions[i].size();
+			checkCudaErrors(cudaMemcpyAsync(dRegionSize + i, &rsize, sizeof(uint32_t),cudaMemcpyHostToDevice, dStream));
+			offset += rsize * 2;
+		}
+
+		request.result = RequestResult(new std::vector<long>());
+		int iterations = 0;
+		std::vector<uint32_t> blockResults;
+		while (totalBlocks > 0) {
+			int numBlocks = std::min(maxBlocks, totalBlocks);
+			int numRecords = numBlocks * KdBlock::MAX_RECORDS_PER_BLOCK;
+
+			int *dTmp = (int*) (dData + numRecords * (qsize + 1));
+			int *dResults = (int*) (dTmp + numRecords);
+			uint64_t *dBlocks = (uint64_t*) (dResults + numRecords);
+			uint32_t *dBlockResults = (uint32_t *)(dBlocks + numBlocks * qsize * 2);
+
+			// copy data
+			if(keys != this->lastKeys)
+			{
+				checkCudaErrors(cudaMemcpyAsync(dData, keys, KdBlock::MAX_RECORDS_PER_BLOCK * sizeof(TripKey) * (qsize + 1) * numBlocks, cudaMemcpyHostToDevice, dStream));
+				this->lastKeys = keys;
+			}
+
+			// copy block ranges
+			if (ranges != this->lastRanges) 
+			{
+				checkCudaErrors(cudaMemcpyAsync(dBlocks, ranges,2 * qsize * sizeof(uint64_t) * numBlocks,cudaMemcpyHostToDevice, dStream));
+				this->lastRanges = ranges;
+			}
+			totalBlocks -= numBlocks;
+			ranges += numBlocks * 2 * qsize;
+
+			if(dp) {
+				testBlockDP(numBlocks, dBlocks, dBlockResults, dData, qsize, dQueryRange, request.noRegions, dRegionSize, dRegionOffset, dRegions, dResults, dStream);
+				getResults(numRecords, dResults, *request.result, dStream, dTmp);
+			} else {
+				testBlock(numBlocks, dBlocks, dBlockResults, dQueryRange, dStream, qsize);
+				numBlocks = compactBlocks(numBlocks, dBlockResults, blockResults);
+				numRecords = numBlocks * KdBlock::MAX_RECORDS_PER_BLOCK;
+				testKey(numRecords, dBlockResults, dData, qsize, dQueryRange, request.noRegions, dRegionSize, dRegionOffset, dRegions, dResults, dStream);
+				getResults(numRecords, dResults, *request.result, dStream, dTmp);
+			}
+			iterations++;
+		}
+		checkCudaErrors(cudaStreamDestroy(dStream));
+		request.state = RS_DONE;
+		this->results.push(request);
+	}
+
+
+
 	void CudaDevice::completeQuery(KdRequest &request, bool dp) {
 		uint32_t qsize = request.query->size;
 		int tosub = sizeof(uint64_t) * 2 * qsize; // QueryRange
@@ -146,14 +248,7 @@ namespace mongo {
 		size_t den = sizeof(uint64_t) * qsize * 2 + sizeof(uint64_t);
 		int maxBlocks = remMemory / den;
 		
-	//		int maxRecords = (this->memReserved - sizeof(uint32_t) * 12 - sizeof(float) * (request.srcRegion.size() + request.dstRegion.size()) * 2) / (sizeof(TripKey) + sizeof(int) + sizeof(uint32_t) * 13.0 / KdBlock::MAX_RECORDS_PER_BLOCK);
-//		size_t maxRecords = this->memReserved - tosub;
-//		float den = (sizeof(TripKey)* (qsize + 1) + sizeof(uint64_t) + sizeof(uint64_t) * ((float)qsize) * 2.0 / KdBlock::MAX_RECORDS_PER_BLOCK);
-//		
-//		maxRecords /= den;
-//		int maxBlocks = maxRecords / KdBlock::MAX_RECORDS_PER_BLOCK;
 		int totalBlocks = request.numBlocks;
-//		printf("maxBlock: %d totalBlocks %d\n", maxBlocks, totalBlocks);
 		
 		TripKey *keys = request.keys;
 		uint64_t *ranges = request.ranges;
@@ -183,57 +278,38 @@ namespace mongo {
 			offset += rsize * 2;
 		}
 
-//		checkCudaErrors(cudaMemcpyAsync(dDstRegion, &request.dstRegion[0],sizeof(float) * request.dstRegion.size() * 2,cudaMemcpyHostToDevice, dStream));
-
 		request.result = RequestResult(new std::vector<long>());
 		int iterations = 0;
-		std::vector<uint64_t> blockResults;
+		std::vector<uint32_t> blockResults;
 		while (totalBlocks > 0) {
 			int numBlocks = std::min(maxBlocks, totalBlocks);
 			int numRecords = numBlocks * KdBlock::MAX_RECORDS_PER_BLOCK;
 	
-//			long *dResults = (long*) (dData + numRecords * (qsize + 1));
-//			uint64_t *dBlocks = (uint64_t*) (dResults + numRecords);
 			uint64_t *dBlocks = (uint64_t*) (dData);
-//			// TODO check below
-			uint64_t *dBlockResults = (uint64_t *)(dBlocks + numBlocks * qsize * 2);
-//	
-//			if (keys != this->lastKeys) {
-//				checkCudaErrors(cudaMemcpyAsync(dData, keys, numRecords * sizeof(TripKey) * (qsize + 1),cudaMemcpyHostToDevice, dStream));
-//				uint64_t *st = keys + 4;
-//				this->lastKeys = keys;
-//			}
-			// if (ranges != this->lastRanges) 
+			uint32_t *dBlockResults = (uint32_t *)(dBlocks + numBlocks * qsize * 2);
+
 			{
 				checkCudaErrors(cudaMemcpyAsync(dBlocks, ranges,2 * qsize * sizeof(uint64_t) * numBlocks,cudaMemcpyHostToDevice, dStream));
 				this->lastRanges = ranges;
 			}
 			totalBlocks -= numBlocks;
-//			keys += numBlocks * KdBlock::MAX_RECORDS_PER_BLOCK;
 			ranges += numBlocks * 2 * qsize;
 	
 			if (dp) {
-//				testBlockDP(numBlocks, dBlocks, dBlockResults, dData, dQueryRange,
-//						request.query, request.srcRegion.size(), dSrcRegion,
-//						request.dstRegion.size(), dDstRegion, dResults, dStream);
-//				getResults(numRecords, dResults, *request.result, dStream);
+				// Do nothing
 			} else {
 				testBlock(numBlocks, dBlocks, dBlockResults, dQueryRange, dStream, qsize);
 				numBlocks = compactBlocks(numBlocks, dBlockResults, blockResults);
-//				numRecords = numBlocks * KdBlock::MAX_RECORDS_PER_BLOCK;
-//				testKey(numRecords, dBlockResults, dData, qsize, dQueryRange, request.noRegions, dRegionSize, dRegionOffset, dRegions, dResults, dStream);
-//				getResults(numRecords, dResults, *request.result, dStream);
 			}
 			iterations++;
 		}
-//		printf("no. of blocks found: %lu\n", blockResults.size());
 //		// fprintf(stderr, "(%d) TOTAL COUNT: %lu trips in %d iterations.\n", this->deviceId, request.result->size(), iterations);
 		totalBlocks = blockResults.size();
 		int maxRecords = (this->memReserved - tosub) / (sizeof(TripKey) * (qsize + 1) + sizeof(uint64_t));
 		maxBlocks = maxRecords / KdBlock::MAX_RECORDS_PER_BLOCK;
 		
 		iterations = 0;
-		uint64_t* blockIds = &blockResults[0];
+		uint32_t* blockIds = &blockResults[0];
 		while (totalBlocks > 0) {
 			int numBlocks = std::min(maxBlocks, totalBlocks);
 			int numRecords = numBlocks * KdBlock::MAX_RECORDS_PER_BLOCK;
@@ -258,7 +334,6 @@ namespace mongo {
 	}
 	
 	void CudaDevice::partialQuery(KdRequest &request) {
-//		printf("calling partial query\n");
 		uint32_t qsize = request.query->size;
 		int regionsSize = 0;
 		int tosub = sizeof(uint64_t) * 2 * qsize;
@@ -271,7 +346,7 @@ namespace mongo {
 		int maxBlocks = maxRecords / KdBlock::MAX_RECORDS_PER_BLOCK;
 		int totalBlocks = request.numBlocks;
 		uint64_t *blockIds = request.ranges;
-	
+//		printf("Total blocks in hybrid: %d \n",totalBlocks);	
 		uint64_t qRange[qsize * 2];
 		request.query->toRange(qRange);
 		
@@ -316,10 +391,88 @@ namespace mongo {
 			iterations++;
 		}
 		// fprintf(stderr, "TOTAL COUNT: %lu trips in %d iterations.\n", request.result->size(), iterations);
-		
+
 		checkCudaErrors(cudaStreamDestroy(dStream));
 		request.state = RS_DONE;
 		this->results.push(request);
 	}
 
+	void CudaDevice::partialQueryIM(KdRequest &request) {
+		uint32_t qsize = request.query->size;
+		int regionsSize = 0;
+		int tosub = sizeof(uint64_t) * 2 * qsize;
+		for(int i = 0;i < request.noRegions;i ++) {
+			regionsSize += request.regions[i].size() * 2;
+		}
+		tosub += regionsSize * sizeof(float) + request.noRegions * sizeof(uint32_t) * 2;
+
+		int maxRecords = (this->memReserved - tosub) / (sizeof(TripKey) * (qsize + 1) + sizeof(uint64_t));
+		int maxBlocks = maxRecords / KdBlock::MAX_RECORDS_PER_BLOCK;
+		TripKey *keys = request.keys;
+
+		int totalBlocks = request.totalBlocks;
+		int numBlocks = request.numBlocks;
+		uint64_t *blockIds = request.ranges;
+		uint32_t *blockResults = (uint32_t*)malloc(numBlocks*sizeof(uint32_t));
+		for(int i = 0;i < request.numBlocks;i ++) {
+			blockResults[i] = (uint32_t)(blockIds[i]);
+		}
+		uint64_t qRange[qsize * 2];
+		request.query->toRange(qRange);
+
+		cudaStream_t dStream;
+		checkCudaErrors(cudaStreamCreate(&dStream));
+
+		uint64_t *dQueryRange = (uint64_t*) this->memory;
+		float *dRegions = (float*) (dQueryRange + qsize * 2);
+
+		uint32_t *dRegionOffset = (uint32_t*)(dRegions + regionsSize);
+		uint32_t *dRegionSize = (uint32_t*)(dRegionOffset + request.noRegions);
+		TripKey *dData = (TripKey*) (dRegionSize + request.noRegions);
+
+		checkCudaErrors(cudaMemcpyAsync(dQueryRange, qRange, qsize * sizeof(uint64_t) * 2,cudaMemcpyHostToDevice, dStream));
+
+		uint32_t offset = 0;
+		for(int i = 0;i < request.noRegions;i ++) {
+			checkCudaErrors(cudaMemcpyAsync(dRegions + offset, &request.regions[i].front(), sizeof(float) * request.regions[i].size() * 2,cudaMemcpyHostToDevice, dStream));
+			checkCudaErrors(cudaMemcpyAsync(dRegionOffset + i, &offset, sizeof(uint32_t),cudaMemcpyHostToDevice, dStream));
+			uint32_t rsize = request.regions[i].size();
+			checkCudaErrors(cudaMemcpyAsync(dRegionSize + i, &rsize, sizeof(uint32_t),cudaMemcpyHostToDevice, dStream));
+			offset += rsize * 2;
+		}
+
+		request.result = RequestResult(new std::vector<long>());
+		int iterations = 0;
+		if(totalBlocks > maxBlocks) {
+			fprintf(stderr, "Data does not fit in memory!\n");
+			return;
+		}
+
+		int totRecords = totalBlocks * KdBlock::MAX_RECORDS_PER_BLOCK;
+
+		int numRecords = numBlocks * KdBlock::MAX_RECORDS_PER_BLOCK;
+
+		int *dTmp = (int*) (dData + totRecords * (qsize + 1));
+		int *dResults = (int*) (dTmp + numRecords);
+		uint32_t *dBlockResults = (uint32_t *)(dResults + numRecords);
+
+			// copy data
+		if(keys != this->lastKeys)
+		{
+			checkCudaErrors(cudaMemcpyAsync(dData, keys, KdBlock::MAX_RECORDS_PER_BLOCK * sizeof(TripKey) * (qsize + 1) * totalBlocks, cudaMemcpyHostToDevice, dStream));
+			checkCudaErrors(cudaDeviceSynchronize());
+			this->lastKeys = keys;
+		}
+		checkCudaErrors(cudaMemcpyAsync(dBlockResults, blockResults, sizeof(uint32_t) * numBlocks,cudaMemcpyHostToDevice, dStream));
+		checkCudaErrors(cudaDeviceSynchronize());
+
+		testKey(numRecords, dBlockResults, dData, qsize, dQueryRange, request.noRegions, dRegionSize, dRegionOffset, dRegions, dResults, dStream);
+		getResults(numRecords, dResults, *request.result, dStream, dTmp);
+		iterations++;
+
+		checkCudaErrors(cudaStreamDestroy(dStream));
+		request.state = RS_DONE;
+		free(blockResults);
+		this->results.push(request);
+	}
 }

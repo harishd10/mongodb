@@ -39,7 +39,9 @@ namespace mongo {
 		void run();
 	
 		void completeQuery(KdRequest &request, bool dp);
+		void completeQueryDP(KdRequest &request, bool dp);
 		void partialQuery(KdRequest &request);
+		void partialQueryIM(KdRequest &request);
 	
 	private:
 		int deviceId;

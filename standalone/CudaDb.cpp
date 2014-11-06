@@ -190,7 +190,7 @@ namespace mongo {
 		for (size_t i = 0; i < this->devices.size(); i++) {
 			this->devices[i]->pop(request);
 			result->insert(result->end(), request.result->begin(),request.result->end());
-			if (request.type == RT_CUDA_PARTIAL)
+			if (request.type == RT_CUDA_PARTIAL || request.type == RT_CUDA_PARTIAL_IM)
 				delete[] request.ranges;
 		}
 	}

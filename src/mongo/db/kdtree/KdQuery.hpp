@@ -148,6 +148,8 @@ namespace mongo {
 		RT_CUDA_PARTIAL = 2,
 		RT_CPU = 3,
 		RT_STOP = 4,
+		RT_CUDA_IM = 5,
+		RT_CUDA_PARTIAL_IM = 6,
 		RT_INVALID
 	};
 	
@@ -183,6 +185,9 @@ namespace mongo {
 		TripKey *keys;
 		uint64_t *ranges;
 		KdQuery * query;
+
+		// for in memory hybrid only
+		int totalBlocks;
 	
 		Neighborhoods::Geometry * regions;
 		int noRegions;
