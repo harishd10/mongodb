@@ -1,7 +1,13 @@
-MongoDB with (a) STING
-======================
+MongoDB with STIG
+=================
 
-This is the MongoDB database that has been  modified to support our GPU based spatio-temporal index (STING). STING has the following properties:
+This is the MongoDB database that has been  modified to support our GPU based spatio-temporal index (STNG) described in our ICDE 2016 paper:
+
+Harish Doraiswamy, Huy T. Vo, Claudio Silva and Juliana Freire.
+A GPU-Based Index to Support Interactive Spatio-Temporal Queries over Historical Data.
+In Proc. Intl. Conf. on Data Engineering (ICDE), 2016.
+
+STIG has the following properties:
 
 1. It supports an index to be created on multiple spatial attributes.
    (current implementation assumed 2D coordinates.)
@@ -21,14 +27,14 @@ The following query execution implementations are present inside MongoDB: CPU, G
 
 The GPU based querying implementation details can be found in the standalone code as well (in the ./standalone directory). This uses the index files created in MongoDB (which can also be created by the standalone code by providing the appropriate binary file format).
 
-Creating a STING index
+Creating a STIG index
 ------------------------
-A STING index can be created in MongoDB using a command similar to:
+A STIG index can be created in MongoDB using a command similar to:
 
-db.trips.ensureIndex({type: "sting", pickup_time: 1, dropoff_time: 1, pickup: "2d", dropoff: "2d"},{name: "taxi_index"})
+db.trips.ensureIndex({type: "stig", pickup_time: 1, dropoff_time: 1, pickup: "2d", dropoff: "2d"},{name: "taxi_index"})
 
 In the above example, trips is the name of the collection.
-The first attribute should be - type: "sting"
+The first attribute should be - type: "stig"
 A "2d" attribute should be stored in the collection as {pickup: {x , y}}
 
 Query syntax
@@ -43,8 +49,8 @@ LICENSE
 
   The source files originally from MongoDB are made available partially under the terms of the
   GNU Affero General Public License (AGPL), and partially under the terms of the 
-  Apache License, version 2.0.  MONGO-README for more details.
+  Apache License, version 2.0.  See MONGO-README for more details.
   
-  The files pertaining to STING -- src/mongo/db/kdtree/\*, src/mongo/db/index/kdtree\*, and standalone/\* -- are 
+  The files pertaining to STNG -- src/mongo/db/kdtree/\*, src/mongo/db/index/kdtree\*, and standalone/\* -- are 
   made available under the terms of the Apache License, version 2.0.
 

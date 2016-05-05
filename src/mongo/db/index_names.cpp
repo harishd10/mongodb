@@ -27,7 +27,7 @@ namespace mongo {
     const string IndexNames::HASHED = "hashed";
 
     // Harish
-    const string IndexNames::KDTREE = "sting";
+    const string IndexNames::KDTREE = "stig";
 
     // static
     string IndexNames::findPluginName(const BSONObj& keyPattern) {
